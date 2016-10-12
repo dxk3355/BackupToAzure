@@ -1,4 +1,4 @@
-package util;
+package main.java.com.backuptoazure.model;
 
 import java.io.File;
 import java.net.URI;
