@@ -1,20 +1,31 @@
 package main.java.com.backuptoazure;
-import java.io.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
-import org.apache.commons.cli.*;
-
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URISyntaxException;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.Collection;
+import java.util.LinkedList;
+import java.util.Properties;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import com.microsoft.azure.storage.*;
-import com.microsoft.azure.storage.blob.*;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.apache.commons.cli.UnrecognizedOptionException;
+
+import com.microsoft.azure.storage.StorageException;
 
 import main.java.com.backuptoazure.model.AzureFile;
 import main.java.com.backuptoazure.util.LoadConfiguration;
@@ -27,9 +38,9 @@ public class Main {
 	public static void main(String[] args) {
 		LinkedList<AzureFile> filesToUpload = new LinkedList<AzureFile>();
 
-		
 		// First we are going to check for a properties file to be specified
-		// If there is a properties file we will load that and use it for variables
+		// If there is a properties file we will load that and use it for
+		// variables
 		Properties propertiesFileContents = null;
 
 		Options properties = getOptionsForPropertyFile();
@@ -41,7 +52,7 @@ public class Main {
 			if (filename != null) {
 				propertiesFileContents = LoadConfiguration.getPropValues(filename);
 			}
-		} catch(UnrecognizedOptionException e){
+		} catch (UnrecognizedOptionException e) {
 			// Ignore this exception since there might be extra options
 		} catch (ParseException e) {
 			logger.log(Level.SEVERE, "Unable to find properties file");
@@ -55,7 +66,7 @@ public class Main {
 		}
 
 		Options options = getOptions();
-		
+
 		try {
 			if (propertiesFileContents != null) {
 				cmd = parser.parse(options, args, propertiesFileContents, false);
@@ -88,110 +99,26 @@ public class Main {
 		addFilesFromDirectory(directory, pattern, filesToUpload, directory.getAbsolutePath(), recursive, hidden);
 
 		// Prepend the storage directory if it exists
-		if (storagePath != null) {
-			if (!storagePath.endsWith("\\")) {
-				storagePath = storagePath.replace("\\", "/");
-			}
-			if (!storagePath.endsWith("/")) {
-				storagePath = storagePath + "/";
-			}
-		} else {
-			storagePath = "";
-		}
+		storagePath = storagePath(storagePath);
 
-		storageConnectionString = "DefaultEndpointsProtocol=https;" + "AccountName=" + cmd.getOptionValue("accountName")
-				+ ";" + "AccountKey=" + cmd.getOptionValue("accountKey");
+		storageConnectionString = BackupController.connectionString(cmd.getOptionValue("accountName"),
+				cmd.getOptionValue("accountKey"));
 		storageContainer = cmd.getOptionValue("storageContainer");
 
 		try {
 
-			uploadFiles(filesToUpload, storagePath, overwrite, forceOverwrite, recursive);
+			BackupController backupController = new BackupController(storageContainer, storageConnectionString,
+					storagePath);
+			backupController.uploadFiles(filesToUpload, overwrite, forceOverwrite);
 
 		} catch (InvalidKeyException e) {
 			logger.log(Level.SEVERE, "Invalid Azure Key");
 			System.exit(-1);
-		} catch (FileNotFoundException e) {
-			logger.log(Level.SEVERE, e.getMessage());
-			System.exit(-1);
-		} catch (URISyntaxException e) {
-			logger.log(Level.SEVERE, e.getMessage());
-			System.exit(-1);
-		} catch (StorageException e) {
-			logger.log(Level.SEVERE, e.getMessage());
-			System.exit(-1);
-		} catch (IOException e) {
-			logger.log(Level.SEVERE, e.getMessage());
-			System.exit(-1);
-		} catch (NoSuchAlgorithmException e) {
+		} catch (URISyntaxException | StorageException | IOException | NoSuchAlgorithmException e) {
 			logger.log(Level.SEVERE, e.getMessage());
 			System.exit(-1);
 		}
 
-	}
-
-	private static void uploadFiles(LinkedList<AzureFile> filesToUpload, String storagePath, boolean overwrite,
-			boolean forceOverwrite, boolean recursive)
-			throws InvalidKeyException, URISyntaxException, StorageException, NoSuchAlgorithmException, IOException {
-		// Retrieve storage account from connection-string.
-		CloudStorageAccount storageAccount = CloudStorageAccount.parse(storageConnectionString);
-
-		// Create the blob client.
-		CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
-
-		// Get a reference to a container.
-		// The container name must be lower case
-		CloudBlobContainer container = blobClient.getContainerReference(storageContainer);
-
-		AzureFile fileToUpload = null;
-		while (filesToUpload.size() > 0) {
-			fileToUpload = filesToUpload.peek();
-			logger.log(Level.FINE, "Uploading: " + fileToUpload.getAbsolutePath());
-
-			String azureFilePath = storagePath + fileToUpload.getAzurePath() + fileToUpload.getName();
-
-			CloudBlockBlob blob = container.getBlockBlobReference(azureFilePath);
-
-			boolean blobExist = blob.exists();
-
-			if (blobExist && overwrite) {
-
-				// Calculate the file's MD5 and compare the one in Azure
-				String md5CheckSum = getMD5ForFile(fileToUpload.getAbsolutePath());
-				blob.downloadAttributes();
-				BlobProperties blobproperties = blob.getProperties();
-
-				if (blobproperties.getContentMD5().equals(md5CheckSum)) {
-					// Don't upload if the files match even if overwrite mode is
-					// in place
-					logger.log(Level.FINER,
-							"File matched existing file: \t" + fileToUpload.getAbsolutePath() + "\t" + azureFilePath);
-
-				} else {
-					// The files don't match and overwrite mode is enabled so
-					// erase then upload new file
-					logger.log(Level.FINER, "File differs from existing file: \t" + fileToUpload.getAbsolutePath()
-							+ "\t" + azureFilePath);
-					logger.log(Level.FINER, "Deleted: " + blob.deleteIfExists());
-					uploadFile(fileToUpload, blob);
-
-				}
-			} else if (blobExist && forceOverwrite) {
-				// The files don't match and overwrite mode is enabled so erase
-				// then upload new file
-				logger.log(Level.FINER,
-						"File already exists, overwriting: \t" + fileToUpload.getName() + "\t" + azureFilePath);
-				logger.log(Level.FINER, "Deleted: " + blob.deleteIfExists());
-				uploadFile(fileToUpload, blob);
-			} else if (!blobExist) {
-				// File doesn't already exist, so just upload
-				uploadFile(fileToUpload, blob);
-			} else {
-				logger.log(Level.WARNING, "File with the same name already exists: \t" + fileToUpload.getAbsolutePath()
-						+ "\t" + azureFilePath);
-			}
-
-			filesToUpload.pop();
-		}
 	}
 
 	/**
@@ -215,41 +142,22 @@ public class Main {
 		Matcher matcher;
 		for (File f : directory.listFiles()) {
 			if (recursive && f.isDirectory()) {
-				if(!f.isHidden()) {
+				if (!f.isHidden()) {
 					addFilesFromDirectory(f, pattern, filesToUpload, baseDirectoryPath, true, hidden);
-				} else if (f.isHidden() == hidden){
+				} else if (f.isHidden() == hidden) {
 					addFilesFromDirectory(f, pattern, filesToUpload, baseDirectoryPath, true, hidden);
 				}
 			}
 			matcher = pattern.matcher(f.getName());
 			if (matcher.matches()) {
-				if(!f.isHidden())  {
+				if (!f.isHidden()) {
 					filesToUpload.add(new AzureFile(f, baseDirectoryPath));
-				} else if(f.isHidden() == hidden){
+				} else if (f.isHidden() == hidden) {
 					filesToUpload.add(new AzureFile(f, baseDirectoryPath));
 				}
 			}
 		}
 
-	}
-
-	/**
-	 * Upload the file to Azure
-	 * 
-	 * @param fileToUpload
-	 *            File to upload
-	 * @param blob
-	 *            Blob object to upload to
-	 * @throws FileNotFoundException
-	 * @throws StorageException
-	 * @throws IOException
-	 */
-	private static void uploadFile(File fileToUpload, CloudBlockBlob blob)
-			throws FileNotFoundException, StorageException, IOException {
-		File source = new File(fileToUpload.getAbsolutePath());
-		blob.upload(new FileInputStream(source), source.length());
-
-		logger.log(Level.FINE, "Upload Complete: " + fileToUpload.getAbsolutePath());
 	}
 
 	/**
@@ -285,8 +193,8 @@ public class Main {
 		}
 		return result;
 	}
-	
-	private static Options getOptions(){
+
+	private static Options getOptions() {
 		Options options = new Options();
 		options.addOption("storagePath", true, "Path to prepend to files");
 		options.addOption("file", true, "single file to upload");
@@ -306,16 +214,15 @@ public class Main {
 		options.addOption(Option.builder("force_overwrite").desc("overwrite existing files").optionalArg(true).build());
 		return options;
 	}
-	
-	private static Options getOptionsForPropertyFile(){
+
+	private static Options getOptionsForPropertyFile() {
 		Options options = new Options();
 		options.addOption("storagePath", true, "Path to prepend to files");
 		options.addOption("file", true, "single file to upload");
 		options.addOption("propertyFile", true, "Property file with command line argument values");
 		options.addOption(Option.builder("filetypes").desc("file types to accept").hasArg().build());
 		options.addOption(Option.builder("directory").desc("directory to pull from").hasArg().build());
-		options.addOption(
-				Option.builder("storageContainer").desc("Azure storage container to use").hasArg().build());
+		options.addOption(Option.builder("storageContainer").desc("Azure storage container to use").hasArg().build());
 		options.addOption(Option.builder("accountKey").desc("Azure Account Key").hasArg().build());
 		options.addOption(Option.builder("accountName").desc("Azure Account Name").hasArg().build());
 		options.addOption(
@@ -326,6 +233,26 @@ public class Main {
 		options.addOption(Option.builder("archive").desc("toggle archive bit").optionalArg(true).build());
 		options.addOption(Option.builder("force_overwrite").desc("overwrite existing files").optionalArg(true).build());
 		return options;
+	}
+
+	/**
+	 * Prepend the storage directory if it exists
+	 * 
+	 * @param storagePath
+	 * @return
+	 */
+	private static String storagePath(String storagePath) {
+		if (storagePath != null) {
+			if (!storagePath.endsWith("\\")) {
+				storagePath = storagePath.replace("\\", "/");
+			}
+			if (!storagePath.endsWith("/")) {
+				storagePath = storagePath + "/";
+			}
+		} else {
+			storagePath = "";
+		}
+		return storagePath;
 	}
 
 }
